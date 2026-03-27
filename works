@@ -11,9 +11,9 @@ const SOURCES = [
 ]; // [cite: 1]
 
 const NODE_TEMPLATES = [
-  //"vmess://",
-  //"vless://",
-  //"trojan://"
+  //"vmess://......",
+  //"vless://......",
+  //"trojan://......"
 ]; // [cite: 2]
 
 /* ========= 核心逻辑：数据处理与缓存 ========= */
