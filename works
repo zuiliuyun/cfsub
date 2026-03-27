@@ -1,6 +1,8 @@
 /**
  * Cloudflare Worker: 全协议订阅生成器 (稳定版)
  * 功能：定时抓取优选IP，锁定节点 Host/SNI 参数，支持多协议 [cite: 1, 2, 3]
+ * KV 绑定 (必做)：在 Cloudflare 控制台的 Settings -> Variables 下，添加 KV Namespace Binding。变量名称必须为 SUBSCRIBES
+ * Cron 设置 (必做)：在 Triggers 选项卡下添加定时任务。为了保证您的订阅有效且不频繁报错，建议设置为 */10 * * * * (每 10 分钟一次)
  */
 
 const SOURCES = [
