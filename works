@@ -4,23 +4,42 @@
  * KV 绑定 (必做)：在 Cloudflare 控制台的 Settings -> Variables 下，添加 KV Namespace Binding。变量名称必须为 SUBSCRIBES
  * Cron 设置 (必做)：在 Triggers 选项卡下添加定时任务。为了保证您的订阅有效且不频繁报错，建议设置为 */10 * * * * (每 10 分钟一次)
  */
-
+/**
+ * Cloudflare Worker: 自动国家标签识别订阅生成器
+ * 支持：根据 IP 后缀 (#JP, #US 等) 自动命名
+ */
 const SOURCES = [
   "https://raw.githubusercontent.com/zuiliuyun/IOP/refs/heads/main/domain",
   "https://raw.githubusercontent.com/zuiliuyun/IOP/refs/heads/main/addressesapi.txt"
-]; // [cite: 1]
+];
 
 const NODE_TEMPLATES = [
-  //"vmess://......",
-  //"vless://......",
-  //"trojan://......"
-]; // [cite: 2]
+  "vmess://"
+  "vless://"
+  "trojan://"
+];
 
-/* ========= 核心逻辑：数据处理与缓存 ========= */
+// 国家代码对照表
+const COUNTRY_MAP = {
+  "JP": "日本",
+  "US": "美国",
+  "HK": "香港",
+  "SG": "新加坡",
+  "KR": "韩国",
+  "TW": "台湾",
+  "CN": "中国",
+  "GB": "英国",
+  "DE": "德国"
+};
+
+/* ========= 核心处理逻辑 ========= */
 async function processAndCache(env) {
   try {
-    const text = await fetchAllSources(); // [cite: 8]
-    const regex = /((?:\d{1,3}\.){3}\d{1,3}|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?::(\d+))?/g; // [cite: 13]
+    const text = await fetchAllSources();
+    
+    // 升级正则：捕获 IP/域名、端口(可选) 以及其后的 #标签(可选)
+    // 匹配格式如: 1.1.1.1:443#JP 或 1.1.1.1#US
+    const regex = /((?:\d{1,3}\.){3}\d{1,3}|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?::(\d+))?(?:#([a-zA-Z]+))?/g;
 
     let addrList = [];
     let seen = new Set();
@@ -28,105 +47,96 @@ async function processAndCache(env) {
     for (const m of text.matchAll(regex)) {
       const host = m[1];
       const port = m[2] || "443";
-      if (!isValidHost(host)) continue; // [cite: 6]
-      const key = host + ":" + port;
+      const tag = m[3] ? m[3].toUpperCase() : null; // 捕获到的 JP, US 等
+      
+      if (!host || host.includes("..")) continue;
+      const key = `${host}:${port}`;
       if (!seen.has(key)) {
         seen.add(key);
-        addrList.push({ host: host, port: port }); // [cite: 16]
+        addrList.push({ host, port, tag });
       }
     }
 
     let results = [];
     for (const tpl of NODE_TEMPLATES) {
-      /* ----- VMESS 处理 ----- */
       if (tpl.startsWith("vmess://")) {
-        const base = decodeVmess(tpl); // [cite: 5, 18]
-        const lockHost = base.host; // [cite: 19]
-        const lockSni = base.sni; // [cite: 19]
+        const base = decodeVmess(tpl);
+        const lockHost = base.host;
+        const lockSni = base.sni;
 
         addrList.forEach((item, i) => {
           let obj = { ...base };
-          obj.add = item.host; // [cite: 19]
-          obj.port = parseInt(item.port, 10); // [cite: 19]
-          obj.host = lockHost; // 锁定原始 Host [cite: 19]
-          obj.sni = lockSni;   // 锁定原始 SNI [cite: 19]
-          const country = getCountry(item.host); // [cite: 7]
-          obj.ps = country + "_VMESS_" + (i + 1); // [cite: 20]
-          results.push(encodeVmess(obj)); // [cite: 5]
+          obj.add = item.host;
+          obj.port = parseInt(item.port, 10);
+          obj.host = lockHost;
+          obj.sni = lockSni;
+          
+          // 确定国家名称
+          const countryName = COUNTRY_MAP[item.tag] || "优选节点";
+          obj.ps = `${countryName}_VMESS_${i + 1}`;
+          
+          results.push(encodeVmess(obj));
         });
-      } 
-      /* ----- VLESS / TROJAN 处理 ----- */
-      else if (tpl.startsWith("vless://") || tpl.startsWith("trojan://")) {
-        try {
-          const u = new URL(tpl); // [cite: 22]
-          const protocol = u.protocol.replace(":", ""); // [cite: 23]
-          const lockSni = u.searchParams.get("sni"); // [cite: 23]
-          const lockHost = u.searchParams.get("host"); // [cite: 23]
+      } else if (tpl.startsWith("vless://") || tpl.startsWith("trojan://")) {
+        const u = new URL(tpl);
+        const protocol = u.protocol.replace(":", "").toUpperCase();
+        const lockSni = u.searchParams.get("sni");
+        const lockHost = u.searchParams.get("host");
 
-          addrList.forEach((item, i) => {
-            const newUrl = new URL(tpl);
-            newUrl.hostname = item.host; // [cite: 24]
-            newUrl.port = item.port; // [cite: 24]
-            if (lockSni) newUrl.searchParams.set("sni", lockSni); // [cite: 24]
-            if (lockHost) newUrl.searchParams.set("host", lockHost); // [cite: 24]
-            const country = getCountry(item.host); // [cite: 24]
-            newUrl.hash = country + "_" + protocol.toUpperCase() + "_" + (i + 1); // [cite: 25]
-            results.push(newUrl.toString()); // [cite: 25]
-          });
-        } catch (e) {
-          console.error("URL 解析失败");
-        }
+        addrList.forEach((item, i) => {
+          const newUrl = new URL(tpl);
+          newUrl.hostname = item.host;
+          newUrl.port = item.port;
+          if (lockSni) newUrl.searchParams.set("sni", lockSni);
+          if (lockHost) newUrl.searchParams.set("host", lockHost);
+          
+          const countryName = COUNTRY_MAP[item.tag] || "优选节点";
+          newUrl.hash = `${countryName}_${protocol}_${i + 1}`;
+          results.push(newUrl.toString());
+        });
       }
     }
 
-    const finalBody = b64Encode(results.join("\n")); // [cite: 31]
+    const finalBody = b64Encode(results.join("\n"));
     if (env && env.SUBSCRIBES) {
-      await env.SUBSCRIBES.put("CACHE_BASE64", finalBody); // 存入 KV [cite: 33]
+      await env.SUBSCRIBES.put("CACHE_BASE64", finalBody);
     }
     return finalBody;
   } catch (err) {
-    return "Error: " + err.message; // [cite: 34]
+    return "Error: " + err.message;
   }
 }
 
 /* ========= 工具函数 ========= */
-function b64Encode(str) { return btoa(String.fromCharCode(...new TextEncoder().encode(str))); } // [cite: 3]
-function b64Decode(str) { return new TextDecoder().decode(Uint8Array.from(atob(str), c => c.charCodeAt(0))); } // [cite: 4]
-function decodeVmess(link) { return JSON.parse(b64Decode(link.replace("vmess://", ""))); } // [cite: 5]
-function encodeVmess(obj) { return "vmess://" + b64Encode(JSON.stringify(obj)); } // [cite: 5]
-function isValidHost(host) { return host && !host.includes("..") && host.length < 255; } // [cite: 6]
-function getCountry(host) {
-  if (/^(43|47|103|45)\./.test(host)) return "SG";
-  if (/^(8|47|59)\./.test(host)) return "HK";
-  if (/^(13|3|18|20|34)\./.test(host)) return "US";
-  return "OTHER";
-} // [cite: 7]
+function b64Encode(str) { return btoa(String.fromCharCode(...new TextEncoder().encode(str))); }
+function b64Decode(str) { return new TextDecoder().decode(Uint8Array.from(atob(str), c => c.charCodeAt(0))); }
+function decodeVmess(link) { return JSON.parse(b64Decode(link.replace("vmess://", ""))); }
+function encodeVmess(obj) { return "vmess://" + b64Encode(JSON.stringify(obj)); }
+
 async function fetchAllSources() {
-  const res = await Promise.allSettled(SOURCES.map(url => fetch(url).then(r => r.text()))); // [cite: 8]
-  return res.filter(r => r.status === "fulfilled").map(r => r.value).join("\n"); // [cite: 9]
+  const res = await Promise.allSettled(SOURCES.map(url => fetch(url).then(r => r.text())));
+  return res.filter(r => r.status === "fulfilled").map(r => r.value).join("\n");
 }
 
-/* ========= Worker 入口 ========= */
+/* ========= 入口导出 ========= */
 export default {
-  // 定时任务：由 Cloudflare Cron Triggers 触发
+  // 定时任务 (Cron)
   async scheduled(event, env, ctx) {
     ctx.waitUntil(processAndCache(env));
   },
 
-  // HTTP 请求：访问订阅链接
+  // HTTP 请求 (fetch)
   async fetch(request, env, ctx) {
-    const url = new URL(request.url); // [cite: 10]
-    const refresh = url.searchParams.get("refresh"); // [cite: 11]
+    const url = new URL(request.url);
+    if (!env.SUBSCRIBES) return new Response("KV 绑定缺失: SUBSCRIBES", { status: 500 });
 
-    if (!env.SUBSCRIBES) {
-      return new Response("错误：未发现 KV 绑定 (SUBSCRIBES)", { status: 500 });
-    }
+    let body = await env.SUBSCRIBES.get("CACHE_BASE64");
 
-    let body = await env.SUBSCRIBES.get("CACHE_BASE64"); // [cite: 12]
-
-    // 如果 KV 为空或手动刷新
-    if (!body || refresh === "true") {
+    // 智能刷新逻辑：有请求时后台悄悄更新，保证随用随新
+    if (!body || url.searchParams.get("refresh") === "true") {
       body = await processAndCache(env);
+    } else {
+      ctx.waitUntil(processAndCache(env));
     }
 
     return new Response(body, {
@@ -134,6 +144,6 @@ export default {
         "Content-Type": "text/plain;charset=utf-8",
         "Access-Control-Allow-Origin": "*"
       }
-    }); // [cite: 32]
+    });
   }
 };
