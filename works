@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker: 多协议订阅生成器（强制锁定 HOST/SNI 版）
+ * Cloudflare Worker: 增强版订阅生成器
  */
 
 const GITHUB_RAW_URL = "https://raw.githubusercontent.com/zuiliuyun/IOP/refs/heads/main/addressesapi.txt";
@@ -10,87 +10,146 @@ const NODE_TEMPLATES = [
   "trojan://"
 ];
 
-function safeBase64Encode(str) {
-  return btoa(unescape(encodeURIComponent(str)));
+/* ========= 安全 Base64 ========= */
+function b64Encode(str) {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(str)));
+}
+function b64Decode(str) {
+  return new TextDecoder().decode(Uint8Array.from(atob(str), c => c.charCodeAt(0)));
 }
 
-function encodeVmess(obj) {
-  return "vmess://" + safeBase64Encode(JSON.stringify(obj));
-}
-
+/* ========= VMESS ========= */
 function decodeVmess(link) {
-  const raw = link.replace("vmess://", "");
-  return JSON.parse(decodeURIComponent(escape(atob(raw))));
+  return JSON.parse(b64Decode(link.replace("vmess://", "")));
+}
+function encodeVmess(obj) {
+  return "vmess://" + b64Encode(JSON.stringify(obj));
 }
 
+/* ========= 工具 ========= */
+function isValidHost(host) {
+  return host && !host.includes("..") && host.length < 255;
+}
+
+/* ========= 主入口 ========= */
 export default {
-  async fetch() {
+  async fetch(request) {
+    const url = new URL(request.url);
+    const type = url.searchParams.get("type") || "base64";
+    const limit = parseInt(url.searchParams.get("limit") || "200");
+
+    const cache = caches.default;
+    const cacheKey = new Request(request.url, request);
+
+    let cached = await cache.match(cacheKey);
+    if (cached) return cached;
+
     try {
       const resp = await fetch(GITHUB_RAW_URL);
       const text = await resp.text();
 
       const regex = /((?:\d{1,3}\.){3}\d{1,3}|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?::(\d+))?/g;
-      let matches = [...text.matchAll(regex)];
-      
-      if (matches.length === 0) return new Response("未找到地址", { status: 404 });
 
       let addrList = [];
       let seen = new Set();
-      for (let m of matches) {
-        let key = m[1] + ":" + (m[2] || "443");
+
+      for (let m of text.matchAll(regex)) {
+        let host = m[1];
+        let port = m[2] || "443";
+
+        if (!isValidHost(host)) continue;
+
+        let key = host + ":" + port;
         if (!seen.has(key)) {
           seen.add(key);
-          addrList.push({ host: m[1], port: m[2] });
+          addrList.push({ host, port });
         }
       }
+
+      addrList = addrList.slice(0, limit);
 
       let results = [];
 
       for (let tpl of NODE_TEMPLATES) {
-        // ================= VMESS 处理 =================
+
+        /* ===== VMESS ===== */
         if (tpl.startsWith("vmess://")) {
-          let baseObj = decodeVmess(tpl);
-          // 预存原始 host 和 sni
-          const lockHost = baseObj.host;
-          const lockSni = baseObj.sni;
+          let base = decodeVmess(tpl);
+
+          const lockHost = base.host;
+          const lockSni = base.sni;
 
           addrList.forEach((item, i) => {
-            let obj = { ...baseObj };
+            let obj = { ...base };
+
             obj.add = item.host;
-            if (item.port) obj.port = item.port;
-            
-            // 强制还原，防止被 item.host 误导
+            obj.port = item.port;
+
+            // 强制锁定
             obj.host = lockHost;
             obj.sni = lockSni;
+
             obj.ps = `VMESS_${i + 1}`;
+
             results.push(encodeVmess(obj));
           });
-        } 
-        // ================= VLESS / TROJAN 处理 =================
-        else if (tpl.startsWith("vless://") || tpl.startsWith("trojan://")) {
-          const reg = /^(vless|trojan):\/\/([^@]+)@([^:]+):([^?#]+)(\?[^#]*)?(#.*)?$/;
-          let parts = tpl.match(reg);
-          if (!parts) continue;
+        }
 
-          let protocol = parts[1];
-          let auth = parts[2];
-          let params = parts[5] || ""; // 这里包含了原始的 sni 和 host 参数
+        /* ===== VLESS / TROJAN ===== */
+        else if (tpl.startsWith("vless://") || tpl.startsWith("trojan://")) {
+
+          const u = new URL(tpl);
+          const protocol = u.protocol.replace(":", "");
+          const auth = u.username;
+          const basePort = u.port;
+
+          const lockSni = u.searchParams.get("sni");
+          const lockHost = u.searchParams.get("host");
 
           addrList.forEach((item, i) => {
-            let port = item.port || parts[4];
-            // 拼接时保留原有的 params（即保留了原始 sni/host）
-            results.push(`${protocol}://${auth}@${item.host}:${port}${params}#${protocol.toUpperCase()}_${i + 1}`);
+            const newUrl = new URL(tpl);
+
+            newUrl.hostname = item.host;
+            newUrl.port = item.port || basePort;
+
+            // 强制锁定（核心）
+            if (lockSni) newUrl.searchParams.set("sni", lockSni);
+            if (lockHost) newUrl.searchParams.set("host", lockHost);
+
+            newUrl.hash = `${protocol.toUpperCase()}_${i + 1}`;
+
+            results.push(newUrl.toString());
           });
         }
       }
 
-      let finalBase64 = safeBase64Encode(results.join("\n"));
-      return new Response(finalBase64, {
-        headers: { "Content-Type": "text/plain; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+      /* ========= 输出 ========= */
+
+      let body;
+
+      if (type === "clash") {
+        let proxies = results.map((line, i) => {
+          return `  - { name: node-${i + 1}, type: vmess, server: example.com, port: 443 }`;
+        }).join("\n");
+
+        body = `proxies:\n${proxies}`;
+      } else {
+        body = b64Encode(results.join("\n"));
+      }
+
+      const response = new Response(body, {
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8",
+          "Cache-Control": "public, max-age=3600"
+        }
       });
 
+      await cache.put(cacheKey, response.clone());
+
+      return response;
+
     } catch (e) {
-      return new Response("错误: " + e.message);
+      return new Response("Error: " + e.message);
     }
   }
 };
