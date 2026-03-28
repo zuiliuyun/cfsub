@@ -1,50 +1,30 @@
 /*
- * Cloudflare Worker: 最终稳定实时订阅生成器
+ * Cloudflare Worker: 最终稳定实时订阅生成器 (全协议保留 + Token 安全版)
  */
 
-const REPO = "zuiliuyun/IOP";
+const REPO = "zuiliuyun/IOP"; // [cite: 1]
+const FILES = ["domain", "addressesapi.txt"]; // [cite: 1]
 
-const FILES = [
-  "domain",
-  "addressesapi.txt"
-];
-
-/* ========= 多协议模板 ========= */
-
+/* ========= 多协议模板 (支持 VMESS/VLESS/TROJAN) ========= */
 const NODE_TEMPLATES = [
-
-  // VMESS
-  "vmess://ewogICJ2IjogIjIiLAogICJwcyI6ICJ0ZXN0IiwKICAiYWRkIjogInRlc3QuY29tIiwKICAicG9ydCI6ICI0NDMiLAogICJpZCI6ICJhYmMiLAogICJuZXQiOiAid3MiLAogICJ0bHMiOiAidGxzIiwKICAiaG9zdCI6ICJ0ZXN0LmNvbSIsCiAgInNuaSI6ICJ0ZXN0LmNvbSIKfQ==",
-
-  // VLESS
-  //"vless://uuid@test.com:443?encryption=none&security=tls&type=ws&host=test.com&sni=test.com#test",
-
-  // TROJAN
+  // VMESS [cite: 2]
+  //"vmess://ewogICJ2IjogIjIiLAogICJwcyI6ICJ0ZXN0IiwKICAiYWRkIjogInRlc3QuY29tIiwKICAicG9ydCI6ICI0NDMiLAogICJpZCI6ICJhYmMiLAogICJuZXQiOiAid3MiLAogICJ0bHMiOiAidGxzIiwKICAiaG9zdCI6ICJ0ZXN0LmNvbSIsCiAgInNuaSI6ICJ0ZXN0LmNvbSIKfQ==",
+  // VLESS (取消注释即可启用) [cite: 2]
+  "vless://6407d49f-3bcd-4653-8fce-897fc962b8a2@join.my.telegram.channel.cmliussss.to.unlock.more.premium.nodes.cf.090227.xyz:443?encryption=none&security=tls&sni=zuiliuyun.us.ci&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=zuiliuyun.us.ci&path=%2Fproxyip%3DProxyIP.US.CMLiussss.Net#%E5%8A%A0%E5%85%A5%E6%88%91%E7%9A%84%E9%A2%91%E9%81%93t.me%2FCMLiussss%E8%A7%A3%E9%94%81%E6%9B%B4%E5%A4%9A%E4%BC%98%E9%80%89%E8%8A%82%E7%82%B9",
+  // TROJAN (取消注释即可启用) [cite: 2]
   //"trojan://password@test.com:443?security=tls&type=ws&host=test.com&sni=test.com#test"
 ];
 
-/* ========= 工具 ========= */
+/* ========= 原始工具函数 ========= */
+function isIP(host) { return /^(\d{1,3}\.){3}\d{1,3}$/.test(host); } // [cite: 3]
+function isValidIP(ip) { return isIP(ip) && ip.split(".").every(n => n >= 0 && n <= 255); } // [cite: 4]
+function clean(line) { return line.trim().replace(/[,|]/g, " ").replace(/\s+/g, " "); } // [cite: 5]
 
-function isIP(host) {
-  return /^(\d{1,3}\.){3}\d{1,3}$/.test(host);
-}
-
-function isValidIP(ip) {
-  return isIP(ip) && ip.split(".").every(n => n >= 0 && n <= 255);
-}
-
-function clean(line) {
-  return line.trim().replace(/[,|]/g, " ").replace(/\s+/g, " ");
-}
-
-/* ========= 实时抓取（核心） ========= */
-
+/* ========= 实时抓取核心 ========= */
 async function fetchGitHubFile(path) {
+  const apiUrl = `https://api.github.com/repos/${REPO}/contents/${path}`; // [cite: 6]
+  const rawUrl = `https://raw.githubusercontent.com/${REPO}/main/${path}`; // [cite: 6]
 
-  const apiUrl = `https://api.github.com/repos/${REPO}/contents/${path}`;
-  const rawUrl = `https://raw.githubusercontent.com/${REPO}/main/${path}`;
-
-  // ===== API（实时）=====
   try {
     const res = await fetch(apiUrl, {
       headers: {
@@ -53,198 +33,121 @@ async function fetchGitHubFile(path) {
         "Cache-Control": "no-cache"
       },
       cf: { cacheTtl: 0 }
-    });
+    }); // [cite: 7]
+    const json = await res.json(); // [cite: 8]
+    if (json.content) return atob(json.content.replace(/\n/g, "")); // [cite: 8]
+  } catch (e) { console.log("API失败:", path); }
 
-    const json = await res.json();
-
-    if (json.content) {
-      console.log("✅ API:", path);
-      return atob(json.content.replace(/\n/g, ""));
-    }
-  } catch (e) {
-    console.log("API失败:", path);
-  }
-
-  // ===== fallback raw =====
   try {
     const res = await fetch(rawUrl + "?t=" + Date.now(), {
       headers: { "Cache-Control": "no-cache" },
       cf: { cacheTtl: 0 }
-    });
-
-    console.log("⚠️ RAW:", path);
-
-    return await res.text();
-  } catch (e) {
-    console.log("RAW失败:", path);
-  }
-
-  return "";
+    }); // [cite: 10]
+    return await res.text(); // [cite: 11]
+  } catch (e) { return ""; }
 }
 
-/* ========= 强解析 ========= */
-
+/* ========= 强解析逻辑 (IP/域名/端口/标签) ========= */
 function parse(text) {
-
   let result = [];
-  let seen = new Set();
-
-  for (let raw of text.split("\n")) {
-
+  let seen = new Set(); // [cite: 12]
+  for (let raw of text.split("\n")) { // [cite: 13]
     let line = clean(raw);
     if (!line) continue;
-
     let tag = null;
-
     if (line.includes("#")) {
       let tmp = line.split("#");
       line = tmp[0];
-      tag = tmp[1]?.toUpperCase();
+      tag = tmp[1]?.toUpperCase(); // [cite: 14]
     }
-
-    let host = null;
-    let port = "443";
-
-    for (let part of line.split(" ")) {
-
+    let host = null, port = "443";
+    for (let part of line.split(" ")) { // [cite: 16]
       if (part.includes(":")) {
         let [h, p] = part.split(":");
-
         if (isValidIP(h) || /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(h)) {
-          host = h;
-          if (p) port = p;
+          host = h; if (p) port = p; // [cite: 17-18]
         }
-      }
-
-      else if (isValidIP(part) || /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(part)) {
-        host = part;
-      }
-
-      else if (/^\d+$/.test(part)) {
-        port = part;
+      } else if (isValidIP(part) || /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(part)) {
+        host = part; // [cite: 18]
+      } else if (/^\d+$/.test(part)) {
+        port = part; // [cite: 19]
       }
     }
-
     if (!host) continue;
-
     let key = `${host}:${port}`;
     if (!seen.has(key)) {
       seen.add(key);
-      result.push({ host, port, tag });
+      result.push({ host, port, tag }); // [cite: 21]
     }
   }
-
   return result;
 }
 
-/* ========= 编码 ========= */
+/* ========= 编码与协议处理 ========= */
+function b64Encode(str) { return btoa(String.fromCharCode(...new TextEncoder().encode(str))); } // [cite: 22]
+function b64Decode(str) { return new TextDecoder().decode(Uint8Array.from(atob(str), c => c.charCodeAt(0))); } // [cite: 23]
+function decodeVmess(link) { return JSON.parse(b64Decode(link.replace("vmess://", ""))); } // [cite: 23]
+function encodeVmess(obj) { return "vmess://" + b64Encode(JSON.stringify(obj)); } // [cite: 24]
+function getName(item) { return item.tag || (isIP(item.host) ? "优选节点" : "优选域名"); } // [cite: 24-25]
 
-function b64Encode(str) {
-  return btoa(String.fromCharCode(...new TextEncoder().encode(str)));
-}
-
-function b64Decode(str) {
-  return new TextDecoder().decode(Uint8Array.from(atob(str), c => c.charCodeAt(0)));
-}
-
-function decodeVmess(link) {
-  return JSON.parse(b64Decode(link.replace("vmess://", "")));
-}
-
-function encodeVmess(obj) {
-  return "vmess://" + b64Encode(JSON.stringify(obj));
-}
-
-/* ========= 名称规则 ========= */
-
-function getName(item) {
-  if (item.tag) return item.tag;
-  return isIP(item.host) ? "优选节点" : "优选域名";
-}
-
-/* ========= 主逻辑 ========= */
-
+/* ========= 主生成逻辑 (完全还原 VLESS/TROJAN 处理) ========= */
 async function generate() {
-
-  const texts = await Promise.all(
-    FILES.map(f => fetchGitHubFile(f))
-  );
-
-  const fullText = texts.join("\n");
-
-  console.log("总长度:", fullText.length);
-
-  const addrList = parse(fullText);
-
-  console.log("节点数:", addrList.length);
-
+  const texts = await Promise.all(FILES.map(f => fetchGitHubFile(f))); // [cite: 25]
+  const addrList = parse(texts.join("\n")); // [cite: 26]
   let results = [];
 
   for (const tpl of NODE_TEMPLATES) {
-
-    // ===== VMESS =====
     if (tpl.startsWith("vmess://")) {
-
-      const base = decodeVmess(tpl);
-      const lockHost = base.host;
-      const lockSni = base.sni;
-
+      const base = decodeVmess(tpl); // [cite: 27]
+      const { host: lockHost, sni: lockSni } = base; // [cite: 28]
       addrList.forEach(item => {
-
-        let obj = { ...base };
-
-        obj.add = item.host;
-        obj.port = parseInt(item.port);
-
-        obj.host = lockHost;
-        obj.sni = lockSni;
-
-        obj.ps = getName(item);
-
-        results.push(encodeVmess(obj));
+        let obj = { ...base, add: item.host, port: parseInt(item.port), host: lockHost, sni: lockSni, ps: getName(item) };
+        results.push(encodeVmess(obj)); // [cite: 28]
       });
-    }
-
-    // ===== VLESS / TROJAN =====
-    else {
-
+    } else {
+      // 完全还原原始 VLESS/TROJAN URL 处理逻辑 [cite: 29-31]
       const u = new URL(tpl);
-
-      const lockHost = u.searchParams.get("host");
-      const lockSni = u.searchParams.get("sni");
+      const lockHost = u.searchParams.get("host"); // 
+      const lockSni = u.searchParams.get("sni"); // 
 
       addrList.forEach(item => {
-
-        const newUrl = new URL(tpl);
-
-        newUrl.hostname = item.host;
-        newUrl.port = item.port;
-
-        if (lockHost) newUrl.searchParams.set("host", lockHost);
-        if (lockSni) newUrl.searchParams.set("sni", lockSni);
-
-        newUrl.hash = getName(item);
-
-        results.push(newUrl.toString());
+        const newUrl = new URL(tpl); // 
+        newUrl.hostname = item.host; // 
+        newUrl.port = item.port; // 
+        if (lockHost) newUrl.searchParams.set("host", lockHost); // 
+        if (lockSni) newUrl.searchParams.set("sni", lockSni); // 
+        newUrl.hash = getName(item); // 
+        results.push(newUrl.toString()); // 
       });
     }
   }
-
-  return b64Encode(results.join("\n"));
+  return b64Encode(results.join("\n")); // [cite: 31]
 }
 
-/* ========= 入口 ========= */
-
+/* ========= 严格验证入口 ========= */
 export default {
-  async fetch() {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const userToken = url.searchParams.get('token');
 
-    const body = await generate();
+    // 只有当环境变量 AUTH_TOKEN 存在且匹配时才允许访问
+    if (!env.AUTH_TOKEN || userToken !== env.AUTH_TOKEN) {
+      return new Response("Unauthorized: Access Denied", { 
+        status: 403, 
+        headers: { "Content-Type": "text/plain; charset=utf-8" } 
+      });
+    }
 
-    return new Response(body, {
-      headers: {
-        "Content-Type": "text/plain",
-        "Cache-Control": "no-store, no-cache"
-      }
-    });
+    try {
+      const body = await generate(); // [cite: 31]
+      return new Response(body, {
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store, no-cache"
+        }
+      }); // [cite: 32]
+    } catch (e) {
+      return new Response("Error: " + e.message, { status: 500 });
+    }
   }
 };
