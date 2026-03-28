@@ -8,7 +8,7 @@ const FILES = ["domain", "addressesapi.txt"]; // [cite: 1]
 /* ========= 多协议模板 (支持 VMESS/VLESS/TROJAN) ========= */
 const NODE_TEMPLATES = [
   // VMESS [cite: 2]
-  "vmess://ewogICJ2IjogIjIiLAogICJwcyI6ICJ0ZXN0IiwKICAiYWRkIjogInRlc3QuY29tIiwKICAicG9ydCI6ICI0NDMiLAogICJpZCI6ICJhYmMiLAogICJuZXQiOiAid3MiLAogICJ0bHMiOiAidGxzIiwKICAiaG9zdCI6ICJ0ZXN0LmNvbSIsCiAgInNuaSI6ICJ0ZXN0LmNvbSIKfQ==",
+  "vmess://",
   // VLESS (取消注释即可启用) [cite: 2]
   //"vless://uuid@test.com:443?encryption=none&security=tls&type=ws&host=test.com&sni=test.com#test",
   // TROJAN (取消注释即可启用) [cite: 2]
